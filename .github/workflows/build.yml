@@ -1,0 +1,61 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Generate Xcode project
+        run: |
+          which xcodegen || brew install xcodegen
+          xcodegen 2>&1 | tee build.log
+
+      # Compile check only: no signing, so nothing installable is produced.
+      - name: Compile app and extension
+        id: build
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project KidProfiles.xcodeproj \
+            -target KidProfiles \
+            -sdk iphoneos \
+            -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO \
+            build 2>&1 | tee -a build.log
+
+      # Posts the outcome to a "Build results" issue so errors are easy to read.
+      - name: Report result
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OUTCOME: ${{ steps.build.outcome }}
+        run: |
+          SHORT="${GITHUB_SHA::7}"
+          if [ "$OUTCOME" = "success" ]; then
+            BODY="✅ Build succeeded for $SHORT"
+          else
+            ERR=$(grep -E "error:|Error:" build.log 2>/dev/null | sort -u | head -n 60 || true)
+            if [ -z "$ERR" ]; then ERR=$(tail -n 40 build.log 2>/dev/null || echo "no build log"); fi
+            BODY=$(printf '❌ Build failed for %s\n\n```\n%s\n```\n' "$SHORT" "$ERR")
+          fi
+          NUM=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "Build results in:title" --json number --jq '.[0].number')
+          if [ -z "$NUM" ]; then
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "Build results" --body "$BODY"
+          else
+            gh issue comment "$NUM" --repo "$GITHUB_REPOSITORY" --body "$BODY"
+          fi
+
